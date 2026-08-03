@@ -1,0 +1,4 @@
+A configuração AstroPh utiliza os valores p=1.0 e q=1.0, sendo essa a configuração particular DeepWalk.
+
+A configuração AstroPh_1 utiliza os valores p=0.25 e q=0.25
+

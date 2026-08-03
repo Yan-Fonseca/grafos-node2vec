@@ -9,6 +9,7 @@ from torch_cluster import random_walk
 from pecanpy import pecanpy
 from gensim.models import Word2Vec
 import logging
+import os
 
 logging.basicConfig(
     format="%(asctime)s : %(levelname)s : %(message)s",
@@ -24,6 +25,8 @@ def patched_load(*args, **kwargs):
 torch.load = patched_load
 
 #------------ CONSTANTS -------------------
+
+CURRENT_DIRECTORY = os.getcwd()
 
 DEVICE = "cuda"
 CPU = "cpu"
@@ -55,9 +58,45 @@ WORKERS = 4
 
 LR = 0.01
 
-EPOCHS = 100
+EPOCHS = 10
 
-#------------ CONSTANTS/ ------------------
+#------------ FUNCTIONS ------------------
+
+
+def connected_edge_split(data, test_ratio=0.1, seed=42):
+    random.seed(seed)
+
+    G = nx.Graph()
+    G.add_edges_from(data.edge_index.t().tolist())
+
+    edges = list(G.edges())
+    random.shuffle(edges)
+
+    target = int(len(edges) * test_ratio)
+
+    removed = []
+
+    for u, v in edges:
+        G.remove_edge(u, v)
+        if nx.is_connected(G):
+            removed.append((u, v))
+        else:
+            G.add_edge(u, v)
+
+        if len(removed) >= target:
+            break
+
+    train_edges = torch.tensor(
+        list(G.edges()),
+        dtype=torch.long
+    ).t()
+
+    test_edges = torch.tensor(
+        removed,
+        dtype=torch.long
+    ).t()
+
+    return train_edges, test_edges
 
 '''from ogb.linkproppred import PygLinkPropPredDataset
 
@@ -76,24 +115,35 @@ data = from_networkx(G)
 #------------------------------------------------
 # Separação dos dados de treino dos dados de teste/validação
 
-transform = RandomLinkSplit(
-    num_val=0.0,
-    num_test=0.10,
-    is_undirected=True,
-    add_negative_train_samples=False,
-)
 
-train_data, _, test_data = transform(data)
+standard_edge_file_path = CURRENT_DIRECTORY + "/edge_files"
+train_file_path = standard_edge_file_path + f"/{DATASET}_train.edg"
+test_file_path = standard_edge_file_path + f"/{DATASET}_test.edg"
 
-edge_index = train_data.edge_index.cpu()
+if (not os.path.exists(train_file_path)) and (not os.path.exists(test_file_path)):
+    print("Generating edge files for train and test steps. This might take a while...")
 
-with open(f"{DATASET}_train.edg", "w") as f:
-    for u, v in edge_index.t().tolist():
-        f.write(f"{u}\t{v}\n")
+    train_edge_index, test_edge_index = connected_edge_split(
+        data,
+        test_ratio=0.10,
+    )
+
+    train_edge_index = train_edge_index.cpu()
+    test_edge_index = test_edge_index.cpu()
+
+    with open(f"edge_files/{DATASET}_train.edg", "w") as f:
+        for u, v in train_edge_index.t().tolist():
+            f.write(f"{u}\t{v}\n")
+
+    with open(f"edge_files/{DATASET}_test.edg", "w") as f:
+        for u, v in test_edge_index.t().tolist():
+            f.write(f"{u}\t{v}\n")
+
+    print("Process Done!")
 
 #-------------------------------------------------
 
-edge_index = train_data.edge_index.to(DEVICE)
+# edge_index = train_data.edge_index.to(DEVICE)
 
 # print(train_data)
 # print(test_data)
@@ -108,7 +158,7 @@ g = pecanpy.SparseOTF(
 )
 
 g.read_edg(
-    f"{DATASET}_train.edg",
+    f"edge_files/{DATASET}_train.edg",
     weighted=False,
     directed=False,
 )
@@ -118,24 +168,13 @@ walks = g.simulate_walks(
     walk_length=WALK_LENGTH,
 )
 
-visited = set()
+'''visited = set()
 
 for walk in walks:
     visited.update(map(int, walk))
-
-print(f"Nós visitados: {len(visited)}")
-print(f"Nós ausentes: {train_data.num_nodes - len(visited)}")
-
-missing = set(range(train_data.num_nodes)) - visited
-print(sorted(list(missing))[:20])
-
-edge_index = train_data.edge_index
-
-for node in list(missing)[:20]:
-    grau = ((edge_index[0] == node) | (edge_index[1] == node)).sum().item()
-    print(node, grau)
-exit()
-
+'''
+# print(f"Nós visitados: {len(visited)}")
+# print(f"Nós ausentes: {train_data.num_nodes - len(visited)}")
 
 model = Word2Vec(
     sentences=walks,
@@ -174,7 +213,7 @@ optimizer = torch.optim.SparseAdam(
 '''
 #---------------------------
 
-num_nodes = train_data.num_nodes
+num_nodes = len(G.nodes) 
 dim = model.vector_size
 
 embeddings = torch.zeros(num_nodes, dim)
@@ -228,7 +267,7 @@ print(f"Shape do embedding: {embeddings.shape}")
 torch.save(embeddings, f'embeddings/{SAVE_FILE}.pt')
 print(f"Embeddings saved to 'embeddings/{SAVE_FILE}.pt'")
 
-torch.save(train_data, f'embeddings/{SAVE_FILE}_train_data.pt')
-torch.save(test_data, f'embeddings/{SAVE_FILE}_test_data.pt')
+# torch.save(train_data, f'embeddings/{SAVE_FILE}_train_data.pt')
+# torch.save(test_data, f'embeddings/{SAVE_FILE}_test_data.pt')
 
-print('Arquivos de treino e test salvos.')
+# print('Arquivos de treino e test salvos.')

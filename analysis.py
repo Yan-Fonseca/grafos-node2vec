@@ -12,7 +12,7 @@ import numpy as np
 
 # ------------------ CONSTANTS ------------------
 
-DATASET = 'AstroPh'
+DATASET = 'AstroPh_1'
 DEVICE = "cuda"
 
 # -----------------------------------------------
