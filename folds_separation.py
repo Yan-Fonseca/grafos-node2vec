@@ -28,7 +28,7 @@ from sklearn.model_selection import KFold
 
 
 def load_graph(edge_list_path, sep=r"\s+"):
-    """
+    r"""
     Carrega um dataset de arestas em formato de texto puro, sem cabeçalho,
     no estilo:
         1 2
@@ -91,11 +91,115 @@ def negative_sampling(G, n_samples, exclude_pairs=None, seed=None):
     return [tuple(pair) for pair in negatives]
 
 
+def check_isolated_test_nodes(G_train, test_pos):
+    """
+    Verifica quantos nós envolvidos nas arestas de TESTE ficaram isolados
+    (grau 0) no grafo de TREINO — ou seja, perderam todas as suas conexões
+    ao remover as arestas de teste.
+
+    Isso é importante para métodos como node2vec/DeepWalk: um nó isolado
+    em G_train não participa de nenhum random walk, então seu embedding
+    fica essencialmente não-treinado (aleatório), o que compromete a
+    predição de qualquer aresta envolvendo esse nó.
+
+    Parameters
+    ----------
+    G_train : networkx.Graph
+        Grafo de treino do fold (já sem as arestas de teste).
+    test_pos : array-like
+        Lista/array de arestas positivas de teste, formato [(u, v), ...].
+
+    Returns
+    -------
+    dict
+        {
+            'test_nodes': int,          # nós distintos envolvidos no teste
+            'isolated_nodes': int,      # quantos desses ficaram com grau 0
+            'isolated_pct': float,      # percentual (0-100)
+            'isolated_node_list': list, # os próprios nós isolados
+        }
+    """
+    test_nodes = set()
+    for u, v in test_pos:
+        test_nodes.add(u)
+        test_nodes.add(v)
+
+    isolated = [
+        node for node in test_nodes
+        if node in G_train and G_train.degree(node) == 0
+    ]
+
+    n_test_nodes = len(test_nodes)
+    n_isolated = len(isolated)
+    pct = (n_isolated / n_test_nodes * 100) if n_test_nodes > 0 else 0.0
+
+    return {
+        "test_nodes": n_test_nodes,
+        "isolated_nodes": n_isolated,
+        "isolated_pct": pct,
+        "isolated_node_list": isolated,
+    }
+
+
+def check_connectivity(G_train):
+    """
+    Relata o estado de conectividade de G_train: quantos componentes
+    conexos existem e qual fração dos nós está no maior componente.
+
+    Um número alto de componentes (ou um maior componente pequeno em
+    relação ao total de nós) indica que o fold fragmentou bastante o
+    grafo original — o que prejudica especialmente node2vec/DeepWalk e
+    GNNs baseadas em message passing (GCN, GraphSAGE, GAT, GAE/VGAE),
+    já que essas técnicas não propagam informação entre componentes
+    distintos.
+
+    Returns
+    -------
+    dict
+        {
+            'n_components': int,
+            'largest_component_size': int,
+            'largest_component_pct': float,  # % dos nós no maior componente
+        }
+    """
+    components = list(nx.connected_components(G_train))
+    n_components = len(components)
+    largest = max((len(c) for c in components), default=0)
+    total_nodes = G_train.number_of_nodes()
+    pct = (largest / total_nodes * 100) if total_nodes else 0.0
+
+    return {
+        "n_components": n_components,
+        "largest_component_size": largest,
+        "largest_component_pct": pct,
+    }
+
+
+def get_spanning_forest_edges(G):
+    """
+    Calcula uma floresta geradora de G (uma árvore geradora por componente
+    conexo) e retorna o conjunto de arestas que a compõem, como frozensets.
+
+    Se essas arestas forem sempre mantidas no treino (nunca sorteadas para
+    o teste), G_train preserva a MESMA estrutura de componentes conexos
+    que o grafo original G — ou seja, nenhum fold fragmenta o grafo além
+    do que ele já era originalmente. É a técnica padrão na literatura de
+    link prediction para evitar desconexão artificial induzida pelo split.
+    """
+    protected = set()
+    for component in nx.connected_components(G):
+        sub = G.subgraph(component)
+        T = nx.minimum_spanning_tree(sub)
+        protected.update(frozenset(e) for e in T.edges())
+    return protected
+
+
 def kfold_link_prediction_split(
     edge_list_path,
     n_splits=5,
     neg_ratio=1.0,
     random_state=42,
+    preserve_connectivity=False,
 ):
     """
     Gera k folds para a tarefa de Link Prediction.
@@ -111,19 +215,45 @@ def kfold_link_prediction_split(
     ----------
     neg_ratio : float
         Proporção negativos/positivos (1.0 = mesma quantidade de cada).
+    preserve_connectivity : bool
+        Se True, calcula uma floresta geradora do grafo completo e nunca
+        sorteia essas arestas para o conjunto de teste, garantindo que
+        G_train nunca fique mais fragmentado do que o grafo original.
+        Recomendado para node2vec/DeepWalk e GNNs baseadas em message
+        passing (GCN, GraphSAGE, GAT, GAE/VGAE). Reduz um pouco o pool de
+        arestas elegíveis para teste (as arestas da floresta geradora
+        ficam sempre no treino).
     """
     G_full = load_graph(edge_list_path)
     all_nodes = list(G_full.nodes())
-    all_edges = np.array(list(G_full.edges()), dtype=object)
+    all_edges_list = list(G_full.edges())
+
+    if preserve_connectivity:
+        protected_set = get_spanning_forest_edges(G_full)
+        protected_edges = [e for e in all_edges_list if frozenset(e) in protected_set]
+        candidate_edges = np.array(
+            [e for e in all_edges_list if frozenset(e) not in protected_set],
+            dtype=object,
+        )
+        print(
+            f"[preserve_connectivity=True] {len(protected_edges)} arestas "
+            f"protegidas (floresta geradora) ficarão sempre no treino; "
+            f"{len(candidate_edges)} arestas elegíveis para teste."
+        )
+    else:
+        protected_edges = []
+        candidate_edges = np.array(all_edges_list, dtype=object)
 
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
     folds = []
     used_negatives = set()  # evita reaproveitar o mesmo par negativo entre folds
 
-    for fold_idx, (train_idx, test_idx) in enumerate(kf.split(all_edges)):
-        train_pos = all_edges[train_idx]
-        test_pos = all_edges[test_idx]
+    for fold_idx, (train_idx, test_idx) in enumerate(kf.split(candidate_edges)):
+        train_pos = np.array(
+            protected_edges + candidate_edges[train_idx].tolist(), dtype=object
+        )
+        test_pos = candidate_edges[test_idx]
 
         # Grafo de treino: mesmos nós do grafo completo, só as arestas de treino
         G_train = nx.Graph()
@@ -147,6 +277,9 @@ def kfold_link_prediction_split(
         )
         used_negatives.update(map(frozenset, test_neg))
 
+        isolation_report = check_isolated_test_nodes(G_train, test_pos)
+        connectivity_report = check_connectivity(G_train)
+
         folds.append(
             {
                 "fold": fold_idx,
@@ -155,6 +288,8 @@ def kfold_link_prediction_split(
                 "train_neg": train_neg,
                 "test_pos": test_pos.tolist(),
                 "test_neg": test_neg,
+                "isolation_report": isolation_report,
+                "connectivity_report": connectivity_report,
             }
         )
 
@@ -162,6 +297,42 @@ def kfold_link_prediction_split(
             f"Fold {fold_idx}: "
             f"train_pos={len(train_pos)}, train_neg={len(train_neg)}, "
             f"test_pos={len(test_pos)}, test_neg={len(test_neg)}"
+        )
+        print(
+            f"          nós isolados em G_train (entre os de teste): "
+            f"{isolation_report['isolated_nodes']}/{isolation_report['test_nodes']} "
+            f"({isolation_report['isolated_pct']:.1f}%)"
+        )
+        print(
+            f"          componentes conexos em G_train: "
+            f"{connectivity_report['n_components']} "
+            f"(maior componente: {connectivity_report['largest_component_pct']:.1f}% dos nós)"
+        )
+        if isolation_report["isolated_nodes"] > 0:
+            print(
+                "          [Aviso] embeddings transdutivos (node2vec/DeepWalk) "
+                "terão qualidade comprometida para esses nós."
+            )
+        if connectivity_report["n_components"] > 1:
+            print(
+                "          [Aviso] grafo fragmentado — node2vec/DeepWalk e "
+                "GNNs (GCN/GraphSAGE/GAT/GAE) não propagam informação entre "
+                "componentes distintos."
+            )
+
+    avg_isolated_pct = np.mean(
+        [f["isolation_report"]["isolated_pct"] for f in folds]
+    )
+    print(
+        f"\nMédia de nós de teste isolados em G_train, entre todos os folds: "
+        f"{avg_isolated_pct:.1f}%"
+    )
+    if avg_isolated_pct > 5:
+        print(
+            "[Aviso] Percentual relevante de nós isolados — considere usar "
+            "heurísticas topológicas (Adamic-Adar, Common Neighbors) como "
+            "baseline ou principal método, já que dependem menos de "
+            "conectividade prévia do nó."
         )
 
     return folds
@@ -172,12 +343,14 @@ if __name__ == "__main__":
     EDGE_LIST_PATH = "colaboracao.txt"   # caminho do seu arquivo de arestas
     N_SPLITS = 5                         # número de folds
     NEG_RATIO = 1.0                      # 1 negativo para cada positivo
+    PRESERVE_CONNECTIVITY = True         # evita fragmentar o grafo nos folds
 
     folds = kfold_link_prediction_split(
         edge_list_path=EDGE_LIST_PATH,
         n_splits=N_SPLITS,
         neg_ratio=NEG_RATIO,
         random_state=42,
+        preserve_connectivity=PRESERVE_CONNECTIVITY,
     )
 
     # Exemplo de acesso aos dados do fold 0
