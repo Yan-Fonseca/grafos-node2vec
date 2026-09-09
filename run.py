@@ -10,6 +10,7 @@ from pecanpy import pecanpy
 from gensim.models import Word2Vec
 import logging
 import os
+import json
 
 logging.basicConfig(
     format="%(asctime)s : %(levelname)s : %(message)s",
@@ -32,8 +33,8 @@ DEVICE = "cuda"
 CPU = "cpu"
 
 TEST_RATIO = 0.10
-SAVE_FILE = "AstroPh_1"
-DATASET = "ca-AstroPh"
+SAVE_FILE = "coauth_DBLP_DeepWalk"
+DATASET = "coauth-DBLP"
 
 # Node2Vec:
 
@@ -43,8 +44,8 @@ CONTEXT_SIZE = 10
 WALKS = 10
 NEGATIVE_SAMPLES = 1
 
-P = 0.25
-Q = 0.25
+P = 1.0
+Q = 1.0
 
 SPARSE = True
 
@@ -61,7 +62,6 @@ LR = 0.01
 EPOCHS = 10
 
 #------------ FUNCTIONS ------------------
-
 
 def connected_edge_split(data, test_ratio=0.1, seed=42):
     random.seed(seed)
@@ -106,9 +106,45 @@ data = dataset[0]
 '''
 
 G = nx.read_edgelist(
-   f"dataset/{DATASET}.txt",
-   nodetype=int
+    f"dataset/{DATASET}.txt",
+    nodetype=int
 )
+
+print("Grafo original:")
+print("Nós:", G.number_of_nodes())
+print("Arestas:", G.number_of_edges())
+print("Componentes:", nx.number_connected_components(G))
+
+largest_component = max(
+    nx.connected_components(G),
+    key=len
+)
+
+G = G.subgraph(largest_component).copy()
+
+print()
+print("Maior componente conexo:")
+print("Nós:", G.number_of_nodes())
+print("Arestas:", G.number_of_edges())
+print("Conectado:", nx.is_connected(G))
+
+mapping = {
+    old_id: new_id
+    for new_id, old_id in enumerate(G.nodes())
+}
+
+G = nx.relabel_nodes(G, mapping)
+
+print(min(G.nodes()))
+print(max(G.nodes()))
+print(G.number_of_nodes())
+
+
+with open(
+    f"edge_files/{DATASET}_node_mapping.json",
+    "w"
+) as f:
+    json.dump(mapping, f)
 
 data = from_networkx(G)
 

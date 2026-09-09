@@ -1,139 +1,282 @@
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, average_precision_score
-from torch_geometric.utils import negative_sampling
 import torch
-from utils import hadamard
 import numpy as np
 
-# from ogb.linkproppred import PygLinkPropPredDataset
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score, average_precision_score
 
-# dataset = PygLinkPropPredDataset(name="ogbl-collab")
-# data = dataset[0]
+from torch_geometric.utils import negative_sampling
 
-# ------------------ CONSTANTS ------------------
 
-DATASET = 'AstroPh_1'
-DEVICE = "cuda"
+# ============================================================
+# CONSTANTS
+# ============================================================
 
-# -----------------------------------------------
+DATASET = "Facebook_DeepWalk_1"
+GRAPH_DATASET = "facebook_combined"
 
-embeddings = torch.load(f"embeddings/{DATASET}.pt", weights_only=True)
-train_data = torch.load(f"embeddings/{DATASET}_train_data.pt", weights_only=False)
-test_data = torch.load(f"embeddings/{DATASET}_test_data.pt", weights_only=False)
+EMBEDDING_FILE = f"embeddings/{DATASET}.pt"
 
-neg_edge_index = negative_sampling(
-    edge_index=train_data.edge_index,
-    num_nodes=train_data.num_nodes,
-    num_neg_samples=train_data.edge_label_index.size(1),
+TRAIN_EDGE_FILE = f"edge_files/{GRAPH_DATASET}_train.edg"
+TEST_EDGE_FILE = f"edge_files/{GRAPH_DATASET}_test.edg"
+
+SEED = 42
+
+
+# ============================================================
+# LOAD EMBEDDINGS
+# ============================================================
+
+embeddings = torch.load(
+    EMBEDDING_FILE,
+    weights_only=True
 )
 
-pos_edge_index = train_data.edge_label_index
+embeddings = embeddings.float()
 
-edge_index = torch.cat(
-    [pos_edge_index, neg_edge_index],
+print("Embeddings:", embeddings.shape)
+
+
+# ============================================================
+# LOAD TRAIN EDGES
+# ============================================================
+
+train_edges = np.loadtxt(
+    TRAIN_EDGE_FILE,
+    dtype=np.int64
+)
+
+train_edge_index = torch.tensor(
+    train_edges.T,
+    dtype=torch.long
+)
+
+
+# ============================================================
+# LOAD TEST EDGES
+# ============================================================
+
+test_edges = np.loadtxt(
+    TEST_EDGE_FILE,
+    dtype=np.int64
+)
+
+test_edge_index = torch.tensor(
+    test_edges.T,
+    dtype=torch.long
+)
+
+
+print("Train edges:", train_edge_index.shape)
+print("Test edges:", test_edge_index.shape)
+
+
+# ============================================================
+# NUMBER OF NODES
+# ============================================================
+
+num_nodes = embeddings.size(0)
+
+print("Número de nós:", num_nodes)
+
+
+# ============================================================
+# ORIGINAL GRAPH
+# ============================================================
+#
+# Precisamos garantir que os negativos não sejam:
+#
+# - arestas de treino
+# - arestas de teste
+#
+# Portanto, usamos todas as arestas do grafo original.
+#
+# ============================================================
+
+original_edge_index = torch.cat(
+    [
+        train_edge_index,
+        test_edge_index
+    ],
     dim=1
 )
 
-labels = torch.cat([
-    torch.ones(pos_edge_index.size(1)),
-    torch.zeros(neg_edge_index.size(1))
-])
+# Como o grafo é não-direcionado, adicionamos as duas direções.
+original_edge_index = torch.cat(
+    [
+        original_edge_index,
+        original_edge_index.flip(0)
+    ],
+    dim=1
+)
 
-z_np = embeddings.numpy()
+# Remove duplicatas
+original_edge_index = torch.unique(
+    original_edge_index,
+    dim=1
+)
+
+print("Arestas no grafo original:", original_edge_index.size(1) // 2)
 
 
-def hadamard(edges):
-    u = edges[0].numpy()
-    v = edges[1].numpy()
-    return z_np[u] * z_np[v]
+# ============================================================
+# NEGATIVE TRAINING EDGES
+# ============================================================
 
-x_train = hadamard(edge_index)
-y_train = labels.numpy()
+torch.manual_seed(SEED)
 
-x_test = hadamard(test_data.edge_label_index)
-y_test = test_data.edge_label.numpy()
+num_train_positive = train_edge_index.size(1)
 
-clf = LogisticRegression(max_iter=1000)
-
-print(f"x_train: {x_train}")
-print(f"y_train: {y_train}")
-
-clf.fit(x_train, y_train)
-scores = clf.predict_proba(x_test)[:,1]
-
-print("AUC: ", roc_auc_score(y_test, scores))
-print("AP: ", average_precision_score(y_test, scores))
-
-'''
-# Get edge splits
-split_edge = dataset.get_edge_split()
-
-# Helper function to get edge embeddings
-def get_link_prediction_data(edge_index, embeddings, label):
-    # Concatenate embeddings of source and target nodes
-    # Ensure edge_index is on CPU to index CPU embeddings
-    u_emb = embeddings[edge_index[0].cpu()]
-    v_emb = embeddings[edge_index[1].cpu()]
-    x = torch.cat([u_emb, v_emb], dim=-1)
-    y = torch.full((edge_index.size(1),), label, dtype=torch.long)
-    return x, y
-
-# Prepare training data
-train_pos_edge = split_edge['train']['edge'].to(DEVICE)
-
-# Generate negative samples for training, since 'edge_neg' is not provided for 'train'
-num_nodes = data.num_nodes
-num_train_pos_edges = train_pos_edge.size(1)
-
-# Transpose train_pos_edge to be [2, num_edges] as expected by negative_sampling
-train_neg_edge = negative_sampling(
-    edge_index=train_pos_edge.t(),  # Transpose here
+train_neg_edge_index = negative_sampling(
+    edge_index=original_edge_index,
     num_nodes=num_nodes,
-    num_neg_samples=num_train_pos_edges,
-).to(DEVICE)
+    num_neg_samples=num_train_positive,
+    method="sparse",
+)
 
-x_train_pos, y_train_pos = get_link_prediction_data(train_pos_edge.t(), embeddings, 1)
-x_train_neg, y_train_neg = get_link_prediction_data(train_neg_edge, embeddings, 0)
 
-x_train = torch.cat([x_train_pos, x_train_neg], dim=0).cpu().numpy()
-y_train = torch.cat([y_train_pos, y_train_neg], dim=0).cpu().numpy()
+# ============================================================
+# NEGATIVE TEST EDGES
+# ============================================================
 
-# Prepare validation data
-valid_pos_edge = split_edge['valid']['edge'].to(DEVICE)
-valid_neg_edge = split_edge['valid']['edge_neg'].to(DEVICE)
+torch.manual_seed(SEED + 1)
 
-x_val_pos, y_val_pos = get_link_prediction_data(valid_pos_edge.t(), embeddings, 1)
-x_val_neg, y_val_neg = get_link_prediction_data(valid_neg_edge.t(), embeddings, 0)
+num_test_positive = test_edge_index.size(1)
 
-x_val = torch.cat([x_val_pos, x_val_neg], dim=0).cpu().numpy()
-y_val = torch.cat([y_val_pos, y_val_neg], dim=0).cpu().numpy()
+test_neg_edge_index = negative_sampling(
+    edge_index=original_edge_index,
+    num_nodes=num_nodes,
+    num_neg_samples=num_test_positive,
+    method="sparse",
+)
 
-# Prepare test data
-test_pos_edge = split_edge['test']['edge'].to(DEVICE)
-test_neg_edge = split_edge['test']['edge_neg'].to(DEVICE)
 
-x_test_pos, y_test_pos = get_link_prediction_data(test_pos_edge.t(), embeddings, 1)
-x_test_neg, y_test_neg = get_link_prediction_data(test_neg_edge.t(), embeddings, 0)
+print("Train positivos:", train_edge_index.size(1))
 
-x_test = torch.cat([x_test_pos, x_test_neg], dim=0).cpu().numpy()
-y_test = torch.cat([y_test_pos, y_test_neg], dim=0).cpu().numpy()
+print("Train negativos:", train_neg_edge_index.size(1))
 
-print(f"Shape of training features: {x_train.shape}, labels: {y_train.shape}")
-print(f"Shape of validation features: {x_val.shape}, labels: {y_val.shape}")
-print(f"Shape of test features: {x_test.shape}, labels: {y_test.shape}")
+print("Test positivos:", test_edge_index.size(1))
 
-# Train Logistic Regression model
-classifier = LogisticRegression(random_state=0, solver='liblinear', C=10, max_iter=1000)
-classifier.fit(x_train, y_train)
+print("Test negativos:", test_neg_edge_index.size(1))
 
-# Evaluate on validation set
-y_pred_val = classifier.predict_proba(x_val)[:, 1]
-val_auc = roc_auc_score(y_val, y_pred_val)
-print(f"Validation AUC: {val_auc:.4f}")
 
-# Evaluate on test set
-y_pred_test = classifier.predict_proba(x_test)[:, 1]
-test_auc = roc_auc_score(y_test, y_pred_test)
-print(f"Test AUC: {test_auc:.4f}")
-'''
+# ============================================================
+# HADAMARD EDGE EMBEDDING
+# ============================================================
 
+z = embeddings.numpy()
+
+
+def hadamard(edge_index):
+    u = edge_index[0].numpy()
+    v = edge_index[1].numpy()
+
+    return z[u] * z[v]
+
+
+# ============================================================
+# TRAINING DATA
+# ============================================================
+
+x_train_pos = hadamard(train_edge_index)
+x_train_neg = hadamard(train_neg_edge_index)
+
+x_train = np.concatenate(
+    [
+        x_train_pos,
+        x_train_neg
+    ],
+    axis=0
+)
+
+y_train = np.concatenate(
+    [
+        np.ones(x_train_pos.shape[0]),
+        np.zeros(x_train_neg.shape[0])
+    ]
+)
+
+
+# ============================================================
+# TEST DATA
+# ============================================================
+
+x_test_pos = hadamard(test_edge_index)
+x_test_neg = hadamard(test_neg_edge_index)
+
+x_test = np.concatenate(
+    [
+        x_test_pos,
+        x_test_neg
+    ],
+    axis=0
+)
+
+y_test = np.concatenate(
+    [
+        np.ones(x_test_pos.shape[0]),
+        np.zeros(x_test_neg.shape[0])
+    ]
+)
+
+
+# ============================================================
+# PRINT SHAPES
+# ============================================================
+
+print()
+print("x_train:", x_train.shape)
+print("y_train:", y_train.shape)
+
+print("x_test:", x_test.shape)
+print("y_test:", y_test.shape)
+
+
+# ============================================================
+# LOGISTIC REGRESSION
+# ============================================================
+
+clf = LogisticRegression(
+    max_iter=1000,
+    random_state=SEED
+)
+
+print()
+print("Treinando Logistic Regression...")
+
+clf.fit(
+    x_train,
+    y_train
+)
+
+
+# ============================================================
+# PREDICTION
+# ============================================================
+
+scores = clf.predict_proba(
+    x_test
+)[:, 1]
+
+
+# ============================================================
+# METRICS
+# ============================================================
+
+auc = roc_auc_score(
+    y_test,
+    scores
+)
+
+ap = average_precision_score(
+    y_test,
+    scores
+)
+
+
+print()
+print("==============================")
+print("RESULTADOS")
+print("==============================")
+
+print(f"AUC: {auc:.4f}")
+print(f"AP:  {ap:.4f}")
