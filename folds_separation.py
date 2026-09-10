@@ -202,6 +202,8 @@ def kfold_link_prediction_split(
     neg_ratio=1.0,
     random_state=42,
     preserve_connectivity=False,
+    save_dir=None,
+    resume=True,
 ):
     """
     Gera k folds para a tarefa de Link Prediction.
@@ -225,6 +227,14 @@ def kfold_link_prediction_split(
         passing (GCN, GraphSAGE, GAT, GAE/VGAE). Reduz um pouco o pool de
         arestas elegíveis para teste (as arestas da floresta geradora
         ficam sempre no treino).
+    save_dir : str, opcional
+        Se fornecido, salva cada fold em '{save_dir}/fold_{idx}.pkl' assim
+        que ele é criado (não espera todos os folds terminarem). Útil para
+        não perder progresso se o processo for interrompido.
+    resume : bool
+        Se True (padrão) e save_dir for fornecido, pula o reprocessamento
+        de qualquer fold cujo arquivo já exista em save_dir, carregando-o
+        do disco em vez de recalculá-lo do zero.
     """
     G_full = load_graph(edge_list_path)
     all_nodes = list(G_full.nodes())
@@ -252,6 +262,19 @@ def kfold_link_prediction_split(
     used_negatives = set()  # evita reaproveitar o mesmo par negativo entre folds
 
     for fold_idx, (train_idx, test_idx) in enumerate(kf.split(candidate_edges)):
+
+        # --- Retomada: se este fold já foi salvo, carrega em vez de recalcular ---
+        if save_dir is not None and resume:
+            fold_path = os.path.join(save_dir, f"fold_{fold_idx}.pkl")
+            if os.path.exists(fold_path):
+                fold = load_single_fold(fold_idx, save_dir)
+                folds.append(fold)
+                # mantém o controle de negativos já usados consistente
+                used_negatives.update(map(frozenset, fold["train_neg"]))
+                used_negatives.update(map(frozenset, fold["test_neg"]))
+                print(f"Fold {fold_idx}: já existe em '{fold_path}', pulando recomputação.")
+                continue
+
         train_pos = np.array(
             protected_edges + candidate_edges[train_idx].tolist(), dtype=object
         )
@@ -294,6 +317,9 @@ def kfold_link_prediction_split(
                 "connectivity_report": connectivity_report,
             }
         )
+
+        if save_dir is not None:
+            save_single_fold(folds[-1], save_dir)
 
         print(
             f"Fold {fold_idx}: "
@@ -340,6 +366,47 @@ def kfold_link_prediction_split(
     return folds
 
 
+def save_single_fold(fold, save_dir="folds_cache"):
+    """
+    Salva UM fold individualmente em '{save_dir}/fold_{idx}.pkl'.
+
+    Chamada dentro do loop de geração, logo após o fold ser criado —
+    assim, se o processo for interrompido no meio (ex: fold 7 de 10),
+    os folds já processados não se perdem.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    filepath = os.path.join(save_dir, f"fold_{fold['fold']}.pkl")
+    with open(filepath, "wb") as f:
+        pickle.dump(fold, f)
+    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+    print(f"          -> fold salvo em '{filepath}' ({size_mb:.2f} MB)")
+
+
+def load_single_fold(fold_idx, save_dir="folds_cache"):
+    """Carrega um único fold salvo por save_single_fold()."""
+    filepath = os.path.join(save_dir, f"fold_{fold_idx}.pkl")
+    with open(filepath, "rb") as f:
+        fold = pickle.load(f)
+    return fold
+
+
+def load_all_folds(save_dir="folds_cache"):
+    """
+    Carrega todos os folds de um diretório salvo por save_single_fold(),
+    em ordem (fold_0.pkl, fold_1.pkl, ...).
+    """
+    fold_files = sorted(
+        f for f in os.listdir(save_dir)
+        if f.startswith("fold_") and f.endswith(".pkl")
+    )
+    folds = []
+    for fname in fold_files:
+        with open(os.path.join(save_dir, fname), "rb") as f:
+            folds.append(pickle.load(f))
+    print(f"{len(folds)} folds carregados de '{save_dir}'.")
+    return folds
+
+
 def save_folds(folds, filepath="folds_cache.pkl"):
     """
     Salva a lista de folds (com G_train, arestas positivas/negativas e
@@ -373,20 +440,20 @@ if __name__ == "__main__":
     N_SPLITS = 5                         # número de folds
     NEG_RATIO = 1.0                      # 1 negativo para cada positivo
     PRESERVE_CONNECTIVITY = True         # evita fragmentar o grafo nos folds
-    FOLDS_CACHE_PATH = "folds_cache.pkl" # onde salvar/carregar os folds
+    SAVE_DIR = "folds_cache"             # cada fold vai para folds_cache/fold_N.pkl
 
-    if os.path.exists(FOLDS_CACHE_PATH):
-        # Já existe um cache — carrega em vez de reprocessar tudo de novo
-        folds = load_folds(FOLDS_CACHE_PATH)
-    else:
-        folds = kfold_link_prediction_split(
-            edge_list_path=EDGE_LIST_PATH,
-            n_splits=N_SPLITS,
-            neg_ratio=NEG_RATIO,
-            random_state=42,
-            preserve_connectivity=PRESERVE_CONNECTIVITY,
-        )
-        save_folds(folds, FOLDS_CACHE_PATH)
+    folds = kfold_link_prediction_split(
+        edge_list_path=EDGE_LIST_PATH,
+        n_splits=N_SPLITS,
+        neg_ratio=NEG_RATIO,
+        random_state=42,
+        preserve_connectivity=PRESERVE_CONNECTIVITY,
+        save_dir=SAVE_DIR,   # salva (e retoma) fold a fold automaticamente
+        resume=True,
+    )
+
+    # Se quiser recarregar depois, em outra execução, sem rodar tudo de novo:
+    # folds = load_all_folds(SAVE_DIR)
 
     # Exemplo de acesso aos dados do fold 0
     fold0 = folds[0]
