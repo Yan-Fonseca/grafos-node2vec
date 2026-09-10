@@ -340,7 +340,7 @@ def kfold_link_prediction_split(
 
 if __name__ == "__main__":
     # ---- Ajuste estes parâmetros para o seu dataset ----
-    EDGE_LIST_PATH = "colaboracao.txt"   # caminho do seu arquivo de arestas
+    EDGE_LIST_PATH = "/home/souzajbr/grafos/dataset/coauth-DBLP-normalized.txt"   # caminho do seu arquivo de arestas
     N_SPLITS = 5                         # número de folds
     NEG_RATIO = 1.0                      # 1 negativo para cada positivo
     PRESERVE_CONNECTIVITY = True         # evita fragmentar o grafo nos folds
