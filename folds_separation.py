@@ -435,12 +435,11 @@ def load_folds(filepath="folds_cache.pkl"):
 
 
 if __name__ == "__main__":
-    # ---- Ajuste estes parâmetros para o seu dataset ----
-    EDGE_LIST_PATH = "/home/souzajbr/grafos/dataset/ca-AstroPh.txt"   # caminho do seu arquivo de arestas
-    N_SPLITS = 5                         # número de folds
-    NEG_RATIO = 1.0                      # 1 negativo para cada positivo
-    PRESERVE_CONNECTIVITY = True         # evita fragmentar o grafo nos folds
-    SAVE_DIR = "/home/souzajbr/grafos/folds_cache-astro-ph"             # cada fold vai para folds_cache/fold_N.pkl
+    EDGE_LIST_PATH = "/home/souzajbr/grafos/dataset/ca-AstroPh.txt"
+    N_SPLITS = 5
+    NEG_RATIO = 1.0
+    PRESERVE_CONNECTIVITY = True
+    SAVE_DIR = "/home/souzajbr/grafos/folds_cache-astro-ph"
 
     folds = kfold_link_prediction_split(
         edge_list_path=EDGE_LIST_PATH,
@@ -448,29 +447,12 @@ if __name__ == "__main__":
         neg_ratio=NEG_RATIO,
         random_state=42,
         preserve_connectivity=PRESERVE_CONNECTIVITY,
-        save_dir=SAVE_DIR,   # salva (e retoma) fold a fold automaticamente
+        save_dir=SAVE_DIR,
         resume=True,
     )
 
-    if os.path.exists(FOLDS_CACHE_PATH):
-        # Já existe um cache — carrega em vez de reprocessar tudo de novo
-        print('Carregando arquivo de folds salvo')
-        folds = load_folds(FOLDS_CACHE_PATH)
-    else:
-        folds = kfold_link_prediction_split(
-            edge_list_path=EDGE_LIST_PATH,
-            n_splits=N_SPLITS,
-            neg_ratio=NEG_RATIO,
-            random_state=42,
-            preserve_connectivity=PRESERVE_CONNECTIVITY,
-        )
-        save_folds(folds, FOLDS_CACHE_PATH)
-
-    # Se quiser recarregar depois, em outra execução, sem rodar tudo de novo:
-    # folds = load_all_folds(SAVE_DIR)
-
-    # Exemplo de acesso aos dados do fold 0
     fold0 = folds[0]
+
     print("\nExemplo - Fold 0:")
     print("Nº de nós no grafo de treino:", fold0["G_train"].number_of_nodes())
     print("Nº de arestas de treino (pos):", len(fold0["train_pos"]))
