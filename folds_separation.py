@@ -19,6 +19,8 @@ Estratégia:
       par negativo em folds/conjuntos diferentes.
 """
 
+import os
+import pickle
 import random
 
 import networkx as nx
@@ -338,20 +340,53 @@ def kfold_link_prediction_split(
     return folds
 
 
+def save_folds(folds, filepath="folds_cache.pkl"):
+    """
+    Salva a lista de folds (com G_train, arestas positivas/negativas e
+    relatórios de diagnóstico) em disco via pickle, evitando ter que
+    reprocessar tudo (negative sampling + spanning forest + diagnósticos)
+    novamente em execuções futuras.
+
+    Atenção: o arquivo pode ficar grande em grafos maiores, já que cada
+    fold guarda uma cópia completa do grafo G_train. Se isso for um
+    problema de espaço, considere salvar apenas as listas de arestas
+    (train_pos/train_neg/test_pos/test_neg) e reconstruir G_train ao
+    carregar, em vez do grafo já pronto.
+    """
+    with open(filepath, "wb") as f:
+        pickle.dump(folds, f)
+    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+    print(f"Folds salvos em '{filepath}' ({size_mb:.1f} MB).")
+
+
+def load_folds(filepath="folds_cache.pkl"):
+    """Carrega uma lista de folds previamente salva com save_folds()."""
+    with open(filepath, "rb") as f:
+        folds = pickle.load(f)
+    print(f"Folds carregados de '{filepath}' ({len(folds)} folds).")
+    return folds
+
+
 if __name__ == "__main__":
     # ---- Ajuste estes parâmetros para o seu dataset ----
     EDGE_LIST_PATH = "/home/souzajbr/grafos/dataset/coauth-DBLP-normalized.txt"   # caminho do seu arquivo de arestas
     N_SPLITS = 5                         # número de folds
     NEG_RATIO = 1.0                      # 1 negativo para cada positivo
     PRESERVE_CONNECTIVITY = True         # evita fragmentar o grafo nos folds
+    FOLDS_CACHE_PATH = "folds_cache.pkl" # onde salvar/carregar os folds
 
-    folds = kfold_link_prediction_split(
-        edge_list_path=EDGE_LIST_PATH,
-        n_splits=N_SPLITS,
-        neg_ratio=NEG_RATIO,
-        random_state=42,
-        preserve_connectivity=PRESERVE_CONNECTIVITY,
-    )
+    if os.path.exists(FOLDS_CACHE_PATH):
+        # Já existe um cache — carrega em vez de reprocessar tudo de novo
+        folds = load_folds(FOLDS_CACHE_PATH)
+    else:
+        folds = kfold_link_prediction_split(
+            edge_list_path=EDGE_LIST_PATH,
+            n_splits=N_SPLITS,
+            neg_ratio=NEG_RATIO,
+            random_state=42,
+            preserve_connectivity=PRESERVE_CONNECTIVITY,
+        )
+        save_folds(folds, FOLDS_CACHE_PATH)
 
     # Exemplo de acesso aos dados do fold 0
     fold0 = folds[0]
