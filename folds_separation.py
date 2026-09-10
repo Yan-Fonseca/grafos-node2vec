@@ -377,6 +377,7 @@ if __name__ == "__main__":
 
     if os.path.exists(FOLDS_CACHE_PATH):
         # Já existe um cache — carrega em vez de reprocessar tudo de novo
+        print('Carregando arquivo de folds salvo')
         folds = load_folds(FOLDS_CACHE_PATH)
     else:
         folds = kfold_link_prediction_split(
