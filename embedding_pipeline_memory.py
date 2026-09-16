@@ -10,26 +10,60 @@ from __future__ import annotations
 
 import gc
 import random
+import logging
+import os
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 from gensim.models import Word2Vec
+from gensim.models.callbacks import CallbackAny2Vec
 from numba import njit
 from scipy.sparse import csr_matrix
 
 from folds_separation_memory import load_fold_npz
 
 SEED = 42
-DIM = 128
-WALK_LENGTH = 80
-CONTEXT_SIZE = 10
-WALKS_PER_NODE = 10
+
+# Perfil recomendado para grafos muito grandes (ex.: coauth-DBLP).
+# Reduz drasticamente o número de tokens/p pares processados no SGNS.
+DIM = 32
+WALK_LENGTH = 40
+CONTEXT_SIZE = 5
+WALKS_PER_NODE = 2
 P = 1.0
 Q = 1.0
-WORKERS = 4
-EPOCHS = 10
+
+# No run.py original havia NEGATIVE_SAMPLES=1, mas ele não era passado ao
+# gensim.Word2Vec (que usa 5 por padrão). Aqui tornamos o parâmetro explícito.
+NEGATIVE_SAMPLES = 1
+
+WORKERS = max(1, min(8, (os.cpu_count() or 4) - 1))
+EPOCHS = 2
 WALK_BATCH_SIZE = 20_000
+
+logging.basicConfig(
+    format="%(asctime)s : %(levelname)s : %(message)s",
+    level=logging.INFO,
+)
+
+
+
+class EpochLogger(CallbackAny2Vec):
+    """Mostra progresso por época do Word2Vec."""
+    def __init__(self):
+        self.epoch = 0
+        self.started = None
+
+    def on_epoch_begin(self, model):
+        self.started = time.time()
+        print(f"  Word2Vec: iniciando época {self.epoch + 1}...")
+
+    def on_epoch_end(self, model):
+        elapsed = time.time() - self.started if self.started else 0.0
+        print(f"  Word2Vec: época {self.epoch + 1} concluída em {elapsed/60:.1f} min")
+        self.epoch += 1
 
 
 def set_seed(seed):
@@ -128,6 +162,7 @@ def train_word2vec_from_corpus(
     context_size: int,
     workers: int,
     epochs: int,
+    negative_samples: int,
     seed: int,
 ):
     print("  construindo vocabulário Word2Vec a partir do corpus em disco...")
@@ -136,6 +171,8 @@ def train_word2vec_from_corpus(
         window=context_size,
         min_count=0,
         sg=1,
+        negative=negative_samples,
+        hs=0,
         workers=workers,
         seed=seed,
     )
@@ -144,10 +181,15 @@ def train_word2vec_from_corpus(
         f"  vocabulário={len(model.wv):,} | "
         f"palavras no corpus={model.corpus_total_words:,}"
     )
+    print(
+        f"  treino Word2Vec: dim={dim}, window={context_size}, "
+        f"negative={negative_samples}, workers={workers}, epochs={epochs}"
+    )
     model.train(
         corpus_file=str(corpus_path),
         total_words=model.corpus_total_words,
         epochs=epochs,
+        callbacks=[EpochLogger()],
     )
     return model
 
@@ -164,8 +206,10 @@ def generate_fold_embedding(
     q=Q,
     workers=WORKERS,
     epochs=EPOCHS,
+    negative_samples=NEGATIVE_SAMPLES,
     walk_batch_size=WALK_BATCH_SIZE,
     seed=SEED,
+    reuse_existing_corpus=True,
 ):
     if p != 1.0 or q != 1.0:
         raise ValueError(
@@ -191,18 +235,26 @@ def generate_fold_embedding(
     gc.collect()
 
     corpus_path = Path(temp_dir) / f"fold_{idx}_walks.txt"
-    print(f"Fold {idx}: gerando corpus DeepWalk streaming em {corpus_path}")
-    write_walk_corpus_streaming(
-        train_pos,
-        corpus_path,
-        num_nodes=num_nodes,
-        num_walks=walks_per_node,
-        walk_length=walk_length,
-        batch_size=walk_batch_size,
-        seed=seed,
-    )
-    del train_pos
-    gc.collect()
+
+    if reuse_existing_corpus and corpus_path.exists() and corpus_path.stat().st_size > 0:
+        print(f"Fold {idx}: reutilizando corpus existente em {corpus_path}")
+        print("  ATENÇÃO: reutilize apenas se ele foi gerado com os mesmos")
+        print("  WALK_LENGTH/WALKS_PER_NODE desejados.")
+        del train_pos
+        gc.collect()
+    else:
+        print(f"Fold {idx}: gerando corpus DeepWalk streaming em {corpus_path}")
+        write_walk_corpus_streaming(
+            train_pos,
+            corpus_path,
+            num_nodes=num_nodes,
+            num_walks=walks_per_node,
+            walk_length=walk_length,
+            batch_size=walk_batch_size,
+            seed=seed,
+        )
+        del train_pos
+        gc.collect()
 
     model = train_word2vec_from_corpus(
         corpus_path,
@@ -210,6 +262,7 @@ def generate_fold_embedding(
         context_size=context_size,
         workers=workers,
         epochs=epochs,
+        negative_samples=negative_samples,
         seed=seed,
     )
 
