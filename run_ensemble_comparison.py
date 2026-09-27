@@ -6,14 +6,14 @@ folds ou embeddings.
 
 from pathlib import Path
 
-from analysis_pipeline_ensembles import evaluate_all_folds
+from analysis_pipeline_ensembles_timing import evaluate_all_folds
 
 DATASET = "coauth-DBLP"
 BASE_DIR = Path("/home/souzajbr/grafos")
 
 FOLDS_DIR = BASE_DIR / f"folds_compact-{DATASET}"
 EMBEDDINGS_DIR = BASE_DIR / "embeddings" / DATASET
-RESULTS_DIR = BASE_DIR / "results" / f"{DATASET}_ensemble_comparison"
+RESULTS_DIR = BASE_DIR / "results" / f"{DATASET}_ensemble_comparison_timing"
 
 THRESHOLD = 0.5
 MAX_TRAIN_PER_CLASS = 500_000
