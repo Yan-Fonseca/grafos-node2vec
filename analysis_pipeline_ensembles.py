@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 import json
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -85,12 +86,16 @@ def fit_models(X_train, y_train, seed):
     scale[scale == 0] = 1.0
 
     models = {}
+    train_times = {}
 
     print("  treinando logistic_regression...")
     X_lr = X_train.copy()
     standardize_inplace(X_lr, mean, scale)
     lr = LogisticRegression(max_iter=1000, random_state=seed, solver="lbfgs")
+    t0 = perf_counter()
     lr.fit(X_lr, y_train)
+    train_times["logistic_regression"] = perf_counter() - t0
+    print(f"    tempo de treino: {train_times['logistic_regression']:.2f} s")
     del X_lr
     gc.collect()
     models["logistic_regression"] = (lr, True)
@@ -105,7 +110,10 @@ def fit_models(X_train, y_train, seed):
         random_state=seed,
         n_jobs=-1,
     )
+    t0 = perf_counter()
     rf.fit(X_train, y_train)
+    train_times["random_forest"] = perf_counter() - t0
+    print(f"    tempo de treino: {train_times['random_forest']:.2f} s")
     models["random_forest"] = (rf, False)
 
     print("  treinando xgboost...")
@@ -123,9 +131,12 @@ def fit_models(X_train, y_train, seed):
         tree_method="hist",
         max_bin=256,
     )
+    t0 = perf_counter()
     xgb.fit(X_train, y_train)
+    train_times["xgboost"] = perf_counter() - t0
+    print(f"    tempo de treino: {train_times['xgboost']:.2f} s")
     models["xgboost"] = (xgb, False)
-    return models, mean, scale
+    return models, mean, scale, train_times
 
 
 def predict_edges_batched(model, needs_scaling, embeddings, edges, mean, scale, batch_size):
@@ -177,7 +188,7 @@ def evaluate_fold(
     )
     print(f"Fold {idx}: X_train={X_train.shape}, {X_train.nbytes / 1024**3:.2f} GiB")
 
-    models, mean, scale = fit_models(X_train, y_train, seed + idx)
+    models, mean, scale, train_times = fit_models(X_train, y_train, seed + idx)
     del X_train, y_train
     gc.collect()
 
@@ -188,25 +199,39 @@ def evaluate_fold(
     ))
 
     probs = {}
+    prediction_times = {}
     rows = []
     for name, (model, scaled) in models.items():
         print(f"Fold {idx}: predizendo {name} em lotes...")
+        t0 = perf_counter()
         pp = predict_edges_batched(model, scaled, embeddings, test_pos, mean, scale, feature_batch_size)
         pn = predict_edges_batched(model, scaled, embeddings, test_neg, mean, scale, feature_batch_size)
+        prediction_times[name] = perf_counter() - t0
+        print(f"    tempo de predição: {prediction_times[name]:.2f} s")
+
         p = np.concatenate((pp, pn))
         probs[name] = p
         row = compute_metrics(y_test, p, threshold)
-        row.update({"fold": idx, "model": name})
+        row.update({
+            "fold": idx,
+            "model": name,
+            "train_time_seconds": float(train_times[name]),
+            "prediction_time_seconds": float(prediction_times[name]),
+            "combination_time_seconds": 0.0,
+            "end_to_end_time_seconds": float(train_times[name] + prediction_times[name]),
+        })
         rows.append(row)
         del pp, pn
 
     names = list(probs)
+    committee_base_time = float(sum(train_times.values()) + sum(prediction_times.values()))
 
     # ========================================================
     # 1) HARD VOTING
     # ========================================================
     # Cada classificador fornece um voto binário. Com 3 modelos,
     # a classe positiva vence quando pelo menos 2 votam em 1.
+    t0 = perf_counter()
     hard_votes = np.zeros(len(y_test), dtype=np.uint8)
     for name in names:
         hard_votes += (probs[name] >= threshold).astype(np.uint8)
@@ -218,21 +243,38 @@ def evaluate_fold(
     # Usamos a fração de votos positivos como score discreto (0, 1/3,
     # 2/3, 1), preservando a decisão majoritária no threshold=0.5.
     hard_score = hard_votes.astype(np.float32) / np.float32(len(names))
+    hard_combination_time = perf_counter() - t0
     row = compute_metrics(y_test, hard_score, threshold)
-    row.update({"fold": idx, "model": "committee_hard_voting"})
+    row.update({
+        "fold": idx,
+        "model": "committee_hard_voting",
+        "train_time_seconds": 0.0,
+        "prediction_time_seconds": 0.0,
+        "combination_time_seconds": float(hard_combination_time),
+        "end_to_end_time_seconds": float(committee_base_time + hard_combination_time),
+    })
     rows.append(row)
 
     # ========================================================
     # 2) SOFT VOTING NÃO PONDERADO
     # ========================================================
     # Média aritmética das probabilidades dos classificadores.
+    t0 = perf_counter()
     soft_score = np.zeros(len(y_test), dtype=np.float32)
     for name in names:
         soft_score += probs[name]
     soft_score /= np.float32(len(names))
+    soft_combination_time = perf_counter() - t0
 
     row = compute_metrics(y_test, soft_score, threshold)
-    row.update({"fold": idx, "model": "committee_soft_voting"})
+    row.update({
+        "fold": idx,
+        "model": "committee_soft_voting",
+        "train_time_seconds": 0.0,
+        "prediction_time_seconds": 0.0,
+        "combination_time_seconds": float(soft_combination_time),
+        "end_to_end_time_seconds": float(committee_base_time + soft_combination_time),
+    })
     rows.append(row)
 
     # ========================================================
@@ -258,12 +300,21 @@ def evaluate_fold(
 
     w /= w.sum()
 
+    t0 = perf_counter()
     weighted_score = np.zeros(len(y_test), dtype=np.float32)
     for wi, name in zip(w, names):
         weighted_score += np.float32(wi) * probs[name]
+    weighted_combination_time = perf_counter() - t0
 
     row = compute_metrics(y_test, weighted_score, threshold)
-    row.update({"fold": idx, "model": "committee_weighted_soft_voting"})
+    row.update({
+        "fold": idx,
+        "model": "committee_weighted_soft_voting",
+        "train_time_seconds": 0.0,
+        "prediction_time_seconds": 0.0,
+        "combination_time_seconds": float(weighted_combination_time),
+        "end_to_end_time_seconds": float(committee_base_time + weighted_combination_time),
+    })
     rows.append(row)
 
     meta = {
@@ -274,6 +325,14 @@ def evaluate_fold(
         "test_negative": int(len(test_neg)),
         "feature_batch_size": int(feature_batch_size),
         "weighted_voting_weights": dict(zip(names, w.tolist())),
+        "train_times_seconds": {k: float(v) for k, v in train_times.items()},
+        "prediction_times_seconds": {k: float(v) for k, v in prediction_times.items()},
+        "committee_base_time_seconds": float(committee_base_time),
+        "committee_combination_times_seconds": {
+            "hard_voting": float(hard_combination_time),
+            "soft_voting": float(soft_combination_time),
+            "weighted_soft_voting": float(weighted_combination_time),
+        },
     }
 
     del (
@@ -321,7 +380,11 @@ def evaluate_all_folds(
         "accuracy", "balanced_accuracy", "precision", "recall", "specificity",
         "f1", "f0.5", "f2", "roc_auc", "average_precision", "mcc", "log_loss",
     ]
-    summary = per_fold.groupby("model")[metric_cols].agg(["mean", "std"])
+    time_cols = [
+        "train_time_seconds", "prediction_time_seconds",
+        "combination_time_seconds", "end_to_end_time_seconds",
+    ]
+    summary = per_fold.groupby("model")[metric_cols + time_cols].agg(["mean", "std"])
     summary.to_csv(output_dir / "metrics_summary.csv")
     confusion = per_fold.groupby("model")[["tn", "fp", "fn", "tp"]].sum().reset_index()
     confusion.to_csv(output_dir / "confusion_matrices_aggregated.csv", index=False)
@@ -331,5 +394,8 @@ def evaluate_all_folds(
         s = per_fold[per_fold.model == model]
         print(f"\n[{model}]")
         for m in metric_cols:
-            print(f"{m:>20}: {s[m].mean():.4f} ± {s[m].std(ddof=1):.4f}")
+            print(f"{m:>24}: {s[m].mean():.4f} ± {s[m].std(ddof=1):.4f}")
+        print("  -- tempos (segundos) --")
+        for t in time_cols:
+            print(f"{t:>24}: {s[t].mean():.2f} ± {s[t].std(ddof=1):.2f}")
     return per_fold, summary, confusion
